@@ -10,7 +10,7 @@ const port = process.env.PORT || 3000;
 
 // CORS configuration
 const corsOptions = {
-  origin: ['https://movierecomendationplatform.netlify.app', 'http://localhost:3000'],
+  origin: ['https://movierecomendationplatform.netlify.app', 'http://localhost:3000', 'https://movierecomendationplatform.netlify.app/'],
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
