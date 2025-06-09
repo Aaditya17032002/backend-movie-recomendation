@@ -5,7 +5,7 @@ yarn-debug.log
 yarn-error.log
 package-lock.json
 yarn.lock
-
+server.js
 # Environment variables
 .env
 .env.local
