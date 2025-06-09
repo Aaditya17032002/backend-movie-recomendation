@@ -5,27 +5,31 @@ const axios = require('axios');
 function buildGeminiPrompt(likedMovies, preferences, alreadyRecommended = []) {
     const page = preferences.page || 1;
     const offset = (page - 1) * 5;
-    return `You are a movie recommendation expert. Based on the following information, recommend 5 movies that would match the user's taste. Return ONLY a valid JSON object with no additional text or formatting.
+    return `You are a movie and TV series recommendation expert. Based on the following information, recommend 5 movies or TV series that would match the user's taste. Return ONLY a valid JSON object with no additional text or formatting.
 
 Input:
-Liked Movies: ${likedMovies.join(', ')}
+Liked Movies/Shows: ${likedMovies.join(', ')}
 Preferences:
 - Genres: ${preferences.genres.join(', ')}
-- Language: ${preferences.language}
 - Mood: ${preferences.mood}
 - Page: ${page}
-${alreadyRecommended.length ? `Do NOT recommend any of these movies: ${alreadyRecommended.join(', ')}` : ''}
+${alreadyRecommended.length ? `Do NOT recommend any of these: ${alreadyRecommended.join(', ')}` : ''}
 
-Important: For each page, recommend DIFFERENT movies that haven't been recommended before. If this is page ${page}, recommend movies ${offset + 1} to ${offset + 5} in your list of recommendations.
+Important Guidelines:
+1. Recommend both movies and TV series
+2. Include recommendations from all languages and regions (Hollywood, Bollywood, International cinema, etc.)
+3. For each page, recommend DIFFERENT titles that haven't been recommended before
+4. If this is page ${page}, recommend titles ${offset + 1} to ${offset + 5} in your list of recommendations
 
 Return a JSON object in this exact format:
 {
     "recommendations": [
         {
-            "title": "Movie Title",
-            "reasoning": "Why this movie matches the user's taste",
+            "title": "Title",
+            "type": "movie or tv_series",
+            "reasoning": "Why this title matches the user's taste",
             "genres": ["genre1", "genre2"],
-            "mood": "mood of the movie"
+            "mood": "mood of the title"
         }
     ]
 }
@@ -37,28 +41,79 @@ Important: Return ONLY the JSON object, no additional text, no markdown formatti
 async function fetchTMDBData(movieTitle) {
     try {
         const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
-        const searchResponse = await axios.get(`${TMDB_BASE_URL}/search/movie`, {
-            params: {
-                api_key: process.env.TMDB_API_KEY,
-                query: movieTitle
-            }
-        });
-        if (!searchResponse.data.results.length) {
+        
+        // Search for both movies and TV shows with language parameter
+        const [movieResponse, tvResponse] = await Promise.all([
+            axios.get(`${TMDB_BASE_URL}/search/movie`, {
+                params: {
+                    api_key: process.env.TMDB_API_KEY,
+                    query: movieTitle,
+                    include_adult: false,
+                    language: 'en-US' // This helps with international content
+                }
+            }),
+            axios.get(`${TMDB_BASE_URL}/search/tv`, {
+                params: {
+                    api_key: process.env.TMDB_API_KEY,
+                    query: movieTitle,
+                    include_adult: false,
+                    language: 'en-US' // This helps with international content
+                }
+            })
+        ]);
+
+        // Log the search results for debugging
+        console.log(`Search results for "${movieTitle}":`);
+        console.log('Movies found:', movieResponse.data.results.length);
+        console.log('TV shows found:', tvResponse.data.results.length);
+
+        // Combine and sort results by relevance
+        const allResults = [
+            ...movieResponse.data.results.map(r => ({ 
+                ...r, 
+                media_type: 'movie',
+                original_language: r.original_language,
+                original_title: r.original_title || r.title
+            })),
+            ...tvResponse.data.results.map(r => ({ 
+                ...r, 
+                media_type: 'tv',
+                original_language: r.original_language,
+                original_title: r.original_name || r.name
+            }))
+        ].sort((a, b) => b.popularity - a.popularity);
+
+        if (!allResults.length) {
+            console.log('No results found for:', movieTitle);
             return null;
         }
-        const movieId = searchResponse.data.results[0].id;
-        const detailsResponse = await axios.get(`${TMDB_BASE_URL}/movie/${movieId}`, {
+
+        const bestMatch = allResults[0];
+        console.log('Best match:', {
+            title: bestMatch.original_title,
+            type: bestMatch.media_type,
+            language: bestMatch.original_language
+        });
+
+        const detailsEndpoint = bestMatch.media_type === 'movie' ? 'movie' : 'tv';
+        
+        const detailsResponse = await axios.get(`${TMDB_BASE_URL}/${detailsEndpoint}/${bestMatch.id}`, {
             params: {
                 api_key: process.env.TMDB_API_KEY,
-                append_to_response: 'credits'
+                append_to_response: 'credits',
+                language: 'en-US'
             }
         });
+
         return {
-            tmdb_id: movieId,
+            tmdb_id: bestMatch.id,
+            media_type: bestMatch.media_type,
+            original_language: bestMatch.original_language,
+            original_title: bestMatch.original_title,
             poster_path: detailsResponse.data.poster_path,
             backdrop_path: detailsResponse.data.backdrop_path,
-            release_date: detailsResponse.data.release_date,
-            runtime: detailsResponse.data.runtime,
+            release_date: bestMatch.media_type === 'movie' ? detailsResponse.data.release_date : detailsResponse.data.first_air_date,
+            runtime: bestMatch.media_type === 'movie' ? detailsResponse.data.runtime : detailsResponse.data.episode_run_time?.[0],
             genres: detailsResponse.data.genres.map(g => g.name),
             cast: detailsResponse.data.credits.cast.slice(0, 5).map(actor => ({
                 name: actor.name,
