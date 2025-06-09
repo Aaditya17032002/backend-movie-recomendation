@@ -39,6 +39,7 @@ Important Guidelines:
 2. ${regionFilter || 'Include recommendations from all languages and regions'}
 3. For each page, recommend DIFFERENT titles that haven't been recommended before
 4. If this is page ${page}, recommend titles ${offset + 1} to ${offset + 5} in your list of recommendations
+5. For each recommendation, include the release year (YYYY) and specify if it is a movie or tv_series.
 
 Return a JSON object in this exact format:
 {
@@ -46,6 +47,7 @@ Return a JSON object in this exact format:
         {
             "title": "Title",
             "type": "movie or tv_series",
+            "year": "YYYY",
             "reasoning": "Why this title matches the user's taste",
             "genres": ["genre1", "genre2"],
             "mood": "mood of the title"
@@ -57,33 +59,31 @@ Important: Return ONLY the JSON object, no additional text, no markdown formatti
 }
 
 // Helper function to fetch TMDB data
-async function fetchTMDBData(movieTitle, preferences = {}) {
+async function fetchTMDBData(movieTitle, preferences = {}, year = null, type = null) {
     try {
         const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
-        
-        // Determine which endpoints to search based on content type
+        // Determine which endpoints to search based on content type or explicit type
         const searchEndpoints = [];
-        if (!preferences.contentType || preferences.contentType === 'movies') {
+        if (type === 'movie' || (!type && (!preferences.contentType || preferences.contentType === 'movies'))) {
             searchEndpoints.push('movie');
         }
-        if (!preferences.contentType || preferences.contentType === 'tv_series') {
+        if (type === 'tv' || (!type && (!preferences.contentType || preferences.contentType === 'tv_series'))) {
             searchEndpoints.push('tv');
         }
-
         // Search for content based on preferences
-        const searchPromises = searchEndpoints.map(endpoint => 
+        const searchPromises = searchEndpoints.map(endpoint =>
             axios.get(`${TMDB_BASE_URL}/search/${endpoint}`, {
                 params: {
                     api_key: process.env.TMDB_API_KEY,
                     query: movieTitle,
                     include_adult: false,
-                    language: 'en-US'
+                    language: 'en-US',
+                    year: endpoint === 'movie' && year ? year : undefined,
+                    first_air_date_year: endpoint === 'tv' && year ? year : undefined
                 }
             })
         );
-
         const responses = await Promise.all(searchPromises);
-        
         // Combine and filter results
         let allResults = [];
         responses.forEach((response, index) => {
@@ -96,7 +96,6 @@ async function fetchTMDBData(movieTitle, preferences = {}) {
             }));
             allResults = [...allResults, ...results];
         });
-
         // Filter by region if specified
         if (preferences.region) {
             allResults = allResults.filter(result => {
@@ -108,22 +107,33 @@ async function fetchTMDBData(movieTitle, preferences = {}) {
                 return true;
             });
         }
-
-        // Sort by popularity
-        allResults.sort((a, b) => b.popularity - a.popularity);
-
-        if (!allResults.length) {
+        // Best match: match by title (case-insensitive, ignore punctuation), year, and type
+        function normalize(str) {
+            return str ? str.toLowerCase().replace(/[^a-z0-9]/gi, '') : '';
+        }
+        let bestMatch = null;
+        if (allResults.length) {
+            // Try to match by normalized title and year
+            bestMatch = allResults.find(r =>
+                normalize(r.title || r.name) === normalize(movieTitle) &&
+                (
+                    (year && ((r.release_date && r.release_date.startsWith(year)) || (r.first_air_date && r.first_air_date.startsWith(year)))) ||
+                    !year
+                )
+            );
+            // If not found, try by normalized title only
+            if (!bestMatch) {
+                bestMatch = allResults.find(r => normalize(r.title || r.name) === normalize(movieTitle));
+            }
+            // If still not found, fallback to most popular
+            if (!bestMatch) {
+                bestMatch = allResults[0];
+            }
+        }
+        if (!bestMatch) {
             console.log('No results found for:', movieTitle);
             return null;
         }
-
-        const bestMatch = allResults[0];
-        console.log('Best match:', {
-            title: bestMatch.original_title,
-            type: bestMatch.media_type,
-            language: bestMatch.original_language
-        });
-
         const detailsEndpoint = bestMatch.media_type;
         const detailsResponse = await axios.get(`${TMDB_BASE_URL}/${detailsEndpoint}/${bestMatch.id}`, {
             params: {
@@ -132,7 +142,6 @@ async function fetchTMDBData(movieTitle, preferences = {}) {
                 language: 'en-US'
             }
         });
-
         return {
             tmdb_id: bestMatch.id,
             media_type: bestMatch.media_type,
@@ -226,14 +235,22 @@ module.exports = async (req, res) => {
         const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500';
         const enrichedRecommendations = await Promise.all(
             recommendations.map(async (rec) => {
-                const tmdbData = await fetchTMDBData(rec.title, preferences);
+                // Use year and type if available for better matching
+                const tmdbData = await fetchTMDBData(
+                    rec.title,
+                    preferences,
+                    rec.year || null,
+                    rec.type === 'tv_series' ? 'tv' : (rec.type === 'movie' ? 'movie' : null)
+                );
                 const omdbData = await fetchOMDBData(rec.title);
+                // Fallback poster image
+                const fallbackPoster = 'https://via.placeholder.com/500x750?text=No+Image';
                 return {
                     ...rec,
                     tmdb_data: tmdbData,
                     omdb_data: omdbData,
-                    poster_url: tmdbData ? `${TMDB_IMAGE_BASE_URL}${tmdbData.poster_path}` : null,
-                    backdrop_url: tmdbData ? `${TMDB_IMAGE_BASE_URL}${tmdbData.backdrop_path}` : null
+                    poster_url: tmdbData && tmdbData.poster_path ? `${TMDB_IMAGE_BASE_URL}${tmdbData.poster_path}` : fallbackPoster,
+                    backdrop_url: tmdbData && tmdbData.backdrop_path ? `${TMDB_IMAGE_BASE_URL}${tmdbData.backdrop_path}` : null
                 };
             })
         );
