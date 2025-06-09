@@ -13,7 +13,8 @@ async function getLastFmData(track, artist) {
                 api_key: LASTFM_API_KEY,
                 artist: artist,
                 track: track,
-                format: 'json'
+                format: 'json',
+                autocorrect: 1
             }
         });
         return response.data.track;
@@ -32,7 +33,8 @@ async function getSimilarTracks(track, artist) {
                 artist: artist,
                 track: track,
                 format: 'json',
-                limit: 10
+                limit: 10,
+                autocorrect: 1
             }
         });
         return response.data.similartracks.track;
@@ -128,8 +130,21 @@ async function analyzeMusicTaste(likedTracks, preferences) {
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const text = response.text();
-        const parsedResponse = JSON.parse(text);
-        return parsedResponse.recommendations || [];
+        console.log('Gemini raw response:', text); // Debug log
+        
+        // Clean the response text
+        const cleanText = text.replace(/```json\n?|\n?```/g, '').trim();
+        console.log('Cleaned response:', cleanText); // Debug log
+        
+        const parsedResponse = JSON.parse(cleanText);
+        console.log('Parsed response:', parsedResponse); // Debug log
+        
+        if (!parsedResponse.recommendations || !Array.isArray(parsedResponse.recommendations)) {
+            console.error('Invalid response format:', parsedResponse);
+            return [];
+        }
+        
+        return parsedResponse.recommendations;
     } catch (error) {
         console.error('Gemini API Error:', error);
         return [];
@@ -154,10 +169,31 @@ async function getMusicRecommendations(req, res) {
             return res.status(400).json({ error: 'No songs provided for recommendations' });
         }
 
+        console.log('Processing request for songs:', likedMovies); // Debug log
+
         // Get recommendations from Gemini
         const geminiRecommendations = await analyzeMusicTaste(likedMovies, preferences);
+        console.log('Gemini recommendations:', geminiRecommendations); // Debug log
         
         if (!geminiRecommendations || geminiRecommendations.length === 0) {
+            // Try to get recommendations directly from Last.fm as fallback
+            const firstTrack = likedMovies[0];
+            const lastFmData = await getLastFmData(firstTrack, '');
+            if (lastFmData) {
+                const similarTracks = await getSimilarTracks(firstTrack, lastFmData.artist.name);
+                if (similarTracks && similarTracks.length > 0) {
+                    const lastFmRecommendations = similarTracks.map(track => ({
+                        title: track.name,
+                        artist: track.artist.name,
+                        type: 'music',
+                        reasoning: `Similar to ${firstTrack}`,
+                        tags: track.tags ? track.tags.map(t => t.name) : [],
+                        listeners: track.listeners || 'N/A',
+                        image: track.image ? track.image[3]['#text'] : null
+                    }));
+                    return res.status(200).json({ recommendations: lastFmRecommendations });
+                }
+            }
             return res.status(200).json({ 
                 recommendations: [],
                 message: 'No recommendations found. Please try with a different song.'
@@ -167,20 +203,25 @@ async function getMusicRecommendations(req, res) {
         // Enrich recommendations with Last.fm data
         const enrichedRecommendations = await Promise.all(
             geminiRecommendations.map(async (rec) => {
-                const lastFmData = await getLastFmData(rec.title, rec.artist);
-                const similarTracks = await getSimilarTracks(rec.title, rec.artist);
-                
-                return {
-                    ...rec,
-                    type: 'music',
-                    listeners: lastFmData?.listeners || 'N/A',
-                    image: lastFmData?.image?.[3]?.['#text'] || null,
-                    description: lastFmData?.wiki?.content || rec.reasoning,
-                    similarTracks: similarTracks.slice(0, 5).map(track => ({
-                        title: track.name,
-                        artist: track.artist.name
-                    }))
-                };
+                try {
+                    const lastFmData = await getLastFmData(rec.title, rec.artist);
+                    const similarTracks = await getSimilarTracks(rec.title, rec.artist);
+                    
+                    return {
+                        ...rec,
+                        type: 'music',
+                        listeners: lastFmData?.listeners || 'N/A',
+                        image: lastFmData?.image?.[3]?.['#text'] || null,
+                        description: lastFmData?.wiki?.content || rec.reasoning,
+                        similarTracks: similarTracks.slice(0, 5).map(track => ({
+                            title: track.name,
+                            artist: track.artist.name
+                        }))
+                    };
+                } catch (error) {
+                    console.error('Error enriching recommendation:', error);
+                    return rec; // Return the original recommendation if enrichment fails
+                }
             })
         );
 
