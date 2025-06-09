@@ -2,7 +2,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const axios = require('axios');
 
 // Helper function to build Gemini prompt
-function buildGeminiPrompt(likedMovies, preferences) {
+function buildGeminiPrompt(likedMovies, preferences, alreadyRecommended = []) {
     const page = preferences.page || 1;
     const offset = (page - 1) * 5;
     return `You are a movie recommendation expert. Based on the following information, recommend 5 movies that would match the user's taste. Return ONLY a valid JSON object with no additional text or formatting.
@@ -14,6 +14,7 @@ Preferences:
 - Language: ${preferences.language}
 - Mood: ${preferences.mood}
 - Page: ${page}
+${alreadyRecommended.length ? `Do NOT recommend any of these movies: ${alreadyRecommended.join(', ')}` : ''}
 
 Important: For each page, recommend DIFFERENT movies that haven't been recommended before. If this is page ${page}, recommend movies ${offset + 1} to ${offset + 5} in your list of recommendations.
 
@@ -111,13 +112,13 @@ module.exports = async (req, res) => {
         return res.status(405).json({ error: 'Method not allowed' });
     }
     try {
-        const { likedMovies, preferences } = req.body || (typeof req.body === 'string' ? JSON.parse(req.body) : {});
+        const { likedMovies, preferences, alreadyRecommended = [] } = req.body || (typeof req.body === 'string' ? JSON.parse(req.body) : {});
         if (!likedMovies || !preferences) {
             return res.status(400).json({ error: 'Missing required parameters' });
         }
         const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
         const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-        const prompt = buildGeminiPrompt(likedMovies, preferences);
+        const prompt = buildGeminiPrompt(likedMovies, preferences, alreadyRecommended);
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const responseText = response.text().trim();
