@@ -5,7 +5,24 @@ const axios = require('axios');
 function buildGeminiPrompt(likedMovies, preferences, alreadyRecommended = []) {
     const page = preferences.page || 1;
     const offset = (page - 1) * 5;
-    return `You are a movie and TV series recommendation expert. Based on the following information, recommend 5 movies or TV series that would match the user's taste. Return ONLY a valid JSON object with no additional text or formatting.
+    
+    // Build content type filter message
+    let contentTypeFilter = '';
+    if (preferences.contentType === 'movies') {
+        contentTypeFilter = 'Recommend ONLY movies (no TV series)';
+    } else if (preferences.contentType === 'tv_series') {
+        contentTypeFilter = 'Recommend ONLY TV series (no movies)';
+    }
+
+    // Build region filter message
+    let regionFilter = '';
+    if (preferences.region === 'hollywood') {
+        regionFilter = 'Recommend ONLY Hollywood (English) content';
+    } else if (preferences.region === 'bollywood') {
+        regionFilter = 'Recommend ONLY Bollywood (Hindi) content';
+    }
+
+    return `You are a movie and TV series recommendation expert. Based on the following information, recommend 5 titles that would match the user's taste. Return ONLY a valid JSON object with no additional text or formatting.
 
 Input:
 Liked Movies/Shows: ${likedMovies.join(', ')}
@@ -13,11 +30,13 @@ Preferences:
 - Genres: ${preferences.genres.join(', ')}
 - Mood: ${preferences.mood}
 - Page: ${page}
+${contentTypeFilter ? `- Content Type: ${contentTypeFilter}` : ''}
+${regionFilter ? `- Region: ${regionFilter}` : ''}
 ${alreadyRecommended.length ? `Do NOT recommend any of these: ${alreadyRecommended.join(', ')}` : ''}
 
 Important Guidelines:
-1. Recommend both movies and TV series
-2. Include recommendations from all languages and regions (Hollywood, Bollywood, International cinema, etc.)
+1. ${contentTypeFilter || 'Recommend both movies and TV series'}
+2. ${regionFilter || 'Include recommendations from all languages and regions'}
 3. For each page, recommend DIFFERENT titles that haven't been recommended before
 4. If this is page ${page}, recommend titles ${offset + 1} to ${offset + 5} in your list of recommendations
 
@@ -38,50 +57,60 @@ Important: Return ONLY the JSON object, no additional text, no markdown formatti
 }
 
 // Helper function to fetch TMDB data
-async function fetchTMDBData(movieTitle) {
+async function fetchTMDBData(movieTitle, preferences = {}) {
     try {
         const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
         
-        // Search for both movies and TV shows with language parameter
-        const [movieResponse, tvResponse] = await Promise.all([
-            axios.get(`${TMDB_BASE_URL}/search/movie`, {
+        // Determine which endpoints to search based on content type
+        const searchEndpoints = [];
+        if (!preferences.contentType || preferences.contentType === 'movies') {
+            searchEndpoints.push('movie');
+        }
+        if (!preferences.contentType || preferences.contentType === 'tv_series') {
+            searchEndpoints.push('tv');
+        }
+
+        // Search for content based on preferences
+        const searchPromises = searchEndpoints.map(endpoint => 
+            axios.get(`${TMDB_BASE_URL}/search/${endpoint}`, {
                 params: {
                     api_key: process.env.TMDB_API_KEY,
                     query: movieTitle,
                     include_adult: false,
-                    language: 'en-US' // This helps with international content
-                }
-            }),
-            axios.get(`${TMDB_BASE_URL}/search/tv`, {
-                params: {
-                    api_key: process.env.TMDB_API_KEY,
-                    query: movieTitle,
-                    include_adult: false,
-                    language: 'en-US' // This helps with international content
+                    language: 'en-US'
                 }
             })
-        ]);
+        );
 
-        // Log the search results for debugging
-        console.log(`Search results for "${movieTitle}":`);
-        console.log('Movies found:', movieResponse.data.results.length);
-        console.log('TV shows found:', tvResponse.data.results.length);
+        const responses = await Promise.all(searchPromises);
+        
+        // Combine and filter results
+        let allResults = [];
+        responses.forEach((response, index) => {
+            const mediaType = searchEndpoints[index];
+            const results = response.data.results.map(r => ({
+                ...r,
+                media_type: mediaType,
+                original_language: r.original_language,
+                original_title: mediaType === 'movie' ? (r.original_title || r.title) : (r.original_name || r.name)
+            }));
+            allResults = [...allResults, ...results];
+        });
 
-        // Combine and sort results by relevance
-        const allResults = [
-            ...movieResponse.data.results.map(r => ({ 
-                ...r, 
-                media_type: 'movie',
-                original_language: r.original_language,
-                original_title: r.original_title || r.title
-            })),
-            ...tvResponse.data.results.map(r => ({ 
-                ...r, 
-                media_type: 'tv',
-                original_language: r.original_language,
-                original_title: r.original_name || r.name
-            }))
-        ].sort((a, b) => b.popularity - a.popularity);
+        // Filter by region if specified
+        if (preferences.region) {
+            allResults = allResults.filter(result => {
+                if (preferences.region === 'hollywood') {
+                    return result.original_language === 'en';
+                } else if (preferences.region === 'bollywood') {
+                    return result.original_language === 'hi';
+                }
+                return true;
+            });
+        }
+
+        // Sort by popularity
+        allResults.sort((a, b) => b.popularity - a.popularity);
 
         if (!allResults.length) {
             console.log('No results found for:', movieTitle);
@@ -95,8 +124,7 @@ async function fetchTMDBData(movieTitle) {
             language: bestMatch.original_language
         });
 
-        const detailsEndpoint = bestMatch.media_type === 'movie' ? 'movie' : 'tv';
-        
+        const detailsEndpoint = bestMatch.media_type;
         const detailsResponse = await axios.get(`${TMDB_BASE_URL}/${detailsEndpoint}/${bestMatch.id}`, {
             params: {
                 api_key: process.env.TMDB_API_KEY,
@@ -171,6 +199,15 @@ module.exports = async (req, res) => {
         if (!likedMovies || !preferences) {
             return res.status(400).json({ error: 'Missing required parameters' });
         }
+
+        // Validate content type and region preferences
+        if (preferences.contentType && !['movies', 'tv_series'].includes(preferences.contentType)) {
+            return res.status(400).json({ error: 'Invalid content type preference' });
+        }
+        if (preferences.region && !['hollywood', 'bollywood'].includes(preferences.region)) {
+            return res.status(400).json({ error: 'Invalid region preference' });
+        }
+
         const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
         const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
         const prompt = buildGeminiPrompt(likedMovies, preferences, alreadyRecommended);
@@ -185,10 +222,11 @@ module.exports = async (req, res) => {
             console.error('Failed to parse Gemini response:', cleanResponse);
             throw new Error('Failed to parse AI response');
         }
+
         const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500';
         const enrichedRecommendations = await Promise.all(
             recommendations.map(async (rec) => {
-                const tmdbData = await fetchTMDBData(rec.title);
+                const tmdbData = await fetchTMDBData(rec.title, preferences);
                 const omdbData = await fetchOMDBData(rec.title);
                 return {
                     ...rec,
