@@ -74,6 +74,28 @@ async function getTopTracksByTag(tag) {
     }
 }
 
+async function fetchAlbumImage(artist, album) {
+    try {
+        const response = await axios.get('https://ws.audioscrobbler.com/2.0/', {
+            params: {
+                method: 'album.getinfo',
+                api_key: LASTFM_API_KEY,
+                artist: artist,
+                album: album,
+                format: 'json',
+                autocorrect: 1
+            }
+        });
+        const images = response.data.album?.image || [];
+        // Prefer 'extralarge' or 'mega'
+        const img = images.find(img => img.size === 'extralarge') || images.find(img => img.size === 'mega');
+        return img?.['#text'] || null;
+    } catch (error) {
+        console.error('Album image fetch error:', error);
+        return null;
+    }
+}
+
 async function analyzeMusicTaste(likedTracks, preferences) {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
     
@@ -239,12 +261,20 @@ async function getMusicRecommendations(req, res) {
                     console.log('Enriching recommendation:', rec);
                     const lastFmData = await getLastFmData(rec.title, rec.artist);
                     const similarTracks = await getSimilarTracks(rec.title, rec.artist);
-                    
+                    // Try to get album image
+                    let albumImage = null;
+                    if (lastFmData?.album?.title && rec.artist) {
+                        albumImage = await fetchAlbumImage(rec.artist, lastFmData.album.title);
+                    }
+                    // Fallback: try with track title as album name
+                    if (!albumImage && rec.artist && rec.title) {
+                        albumImage = await fetchAlbumImage(rec.artist, rec.title);
+                    }
                     return {
                         ...rec,
                         type: 'music',
                         listeners: lastFmData?.listeners || 'N/A',
-                        image: lastFmData?.image?.[3]?.['#text'] || null,
+                        image: albumImage || lastFmData?.image?.[3]?.['#text'] || null,
                         description: lastFmData?.wiki?.content || rec.reasoning,
                         similarTracks: similarTracks.slice(0, 5).map(track => ({
                             title: track.name,
