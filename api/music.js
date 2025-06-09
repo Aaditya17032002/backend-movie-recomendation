@@ -93,11 +93,21 @@ async function analyzeMusicTaste(likedTracks, preferences) {
 }
 
 async function getMusicRecommendations(req, res) {
+    // Add CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    // Handle preflight requests
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+
     try {
-        const { likedTracks, preferences } = req.body;
+        const { likedMovies, preferences, alreadyRecommended, excludeMovies } = req.body;
         
         // Get recommendations from Gemini
-        const geminiRecommendations = await analyzeMusicTaste(likedTracks, preferences);
+        const geminiRecommendations = await analyzeMusicTaste(likedMovies, preferences);
         
         // Enrich recommendations with Last.fm data
         const enrichedRecommendations = await Promise.all(
@@ -119,7 +129,13 @@ async function getMusicRecommendations(req, res) {
             })
         );
 
-        res.status(200).json({ recommendations: enrichedRecommendations });
+        // Filter out any recommendations that are in excludeMovies (case-insensitive)
+        const excludeSet = new Set((excludeMovies || []).map(t => t.toLowerCase().trim()));
+        const filteredRecommendations = enrichedRecommendations.filter(rec => 
+            !excludeSet.has(rec.title.toLowerCase().trim())
+        );
+
+        res.status(200).json({ recommendations: filteredRecommendations });
     } catch (error) {
         console.error('Music Recommendation Error:', error);
         res.status(500).json({
