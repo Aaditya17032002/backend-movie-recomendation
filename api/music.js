@@ -63,29 +63,73 @@ async function getTopTracksByTag(tag) {
 async function analyzeMusicTaste(likedTracks, preferences) {
     const model = genAI.getGenerativeModel({ model: "gemini-pro" });
     
+    // Process the first track to extract artist and title
+    let firstTrack = likedTracks[0];
+    let artist = null;
+    let title = firstTrack;
+
+    // Try to extract artist and title from the input
+    if (firstTrack.includes(" - ")) {
+        [artist, title] = firstTrack.split(" - ").map(s => s.trim());
+    } else if (firstTrack.includes(" by ")) {
+        [title, artist] = firstTrack.split(" by ").map(s => s.trim());
+    }
+
+    // If we couldn't determine the artist, ask Gemini to help identify it
+    if (!artist) {
+        const identifyPrompt = `
+            Given the song title "${title}", identify the most likely artist who performed this song.
+            Return ONLY the artist name, nothing else.`;
+        
+        try {
+            const identifyResult = await model.generateContent(identifyPrompt);
+            const identifyResponse = await identifyResult.response;
+            artist = identifyResponse.text().trim();
+        } catch (error) {
+            console.error('Error identifying artist:', error);
+            artist = "Unknown Artist";
+        }
+    }
+    
     const prompt = `
-        Analyze these music tracks and preferences to understand the user's taste:
-        Liked Tracks: ${likedTracks.join(', ')}
-        Genres: ${preferences.genres.join(', ')}
-        Mood: ${preferences.mood}
+        You are a music recommendation expert. Based on the following information, recommend 5 songs that would match the user's taste. Return ONLY a valid JSON object with no additional text or formatting.
+
+        Input:
+        Liked Song: "${title}" by ${artist}
+        Preferences:
+        - Genres: ${preferences.genres.join(', ') || 'Any'}
+        - Mood: ${preferences.mood || 'Any'}
         
-        Provide recommendations for:
-        1. Similar tracks to the ones they like
-        2. Underrated tracks in their preferred genres
-        3. Latest releases that match their taste
-        
-        Format the response as a JSON array of tracks with:
-        - title
-        - artist
-        - reasoning
-        - tags (array of genres/moods)
-    `;
+        Important Guidelines:
+        1. Recommend songs similar to "${title}" by ${artist}
+        2. Include a mix of popular and underrated tracks
+        3. Consider the user's preferred genres and mood if specified
+        4. For each recommendation, include:
+           - The exact song title
+           - The artist name
+           - A brief reasoning for the recommendation
+           - Relevant tags (genres/moods)
+
+        Return a JSON object in this exact format:
+        {
+            "recommendations": [
+                {
+                    "title": "Song Title",
+                    "artist": "Artist Name",
+                    "reasoning": "Why this song matches the user's taste",
+                    "tags": ["genre1", "genre2", "mood1"]
+                }
+            ]
+        }
+
+        Important: Return ONLY the JSON object, no additional text, no markdown formatting, no backticks.`;
 
     try {
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const text = response.text();
-        return JSON.parse(text);
+        const parsedResponse = JSON.parse(text);
+        return parsedResponse.recommendations || [];
     } catch (error) {
         console.error('Gemini API Error:', error);
         return [];
@@ -106,9 +150,20 @@ async function getMusicRecommendations(req, res) {
     try {
         const { likedMovies, preferences, alreadyRecommended, excludeMovies } = req.body;
         
+        if (!likedMovies || likedMovies.length === 0) {
+            return res.status(400).json({ error: 'No songs provided for recommendations' });
+        }
+
         // Get recommendations from Gemini
         const geminiRecommendations = await analyzeMusicTaste(likedMovies, preferences);
         
+        if (!geminiRecommendations || geminiRecommendations.length === 0) {
+            return res.status(200).json({ 
+                recommendations: [],
+                message: 'No recommendations found. Please try with a different song.'
+            });
+        }
+
         // Enrich recommendations with Last.fm data
         const enrichedRecommendations = await Promise.all(
             geminiRecommendations.map(async (rec) => {
