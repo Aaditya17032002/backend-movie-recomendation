@@ -1,5 +1,6 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const axios = require('axios');
+const { getMusicRecommendations } = require('./music');
 
 // Helper function to build Gemini prompt
 function buildGeminiPrompt(likedMovies, preferences, alreadyRecommended = [], excludeMovies = []) {
@@ -193,19 +194,16 @@ async function fetchOMDBData(movieTitle) {
     }
 }
 
-module.exports = async (req, res) => {
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method not allowed' });
-    }
+async function handleRecommendations(req, res) {
     try {
-        const { likedMovies, preferences, alreadyRecommended = [], excludeMovies = [] } = req.body || (typeof req.body === 'string' ? JSON.parse(req.body) : {});
+        const { likedMovies, preferences, alreadyRecommended, excludeMovies } = req.body;
+        
+        // If content type is music, use music recommendations
+        if (preferences.contentType === 'music') {
+            return await getMusicRecommendations(req, res);
+        }
+        
+        // Existing movie/TV series recommendation logic
         if (!likedMovies || !preferences) {
             return res.status(400).json({ error: 'Missing required parameters' });
         }
@@ -267,4 +265,6 @@ module.exports = async (req, res) => {
             details: error.message
         });
     }
-}; 
+}
+
+module.exports = handleRecommendations; 
