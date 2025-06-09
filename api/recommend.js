@@ -2,7 +2,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const axios = require('axios');
 
 // Helper function to build Gemini prompt
-function buildGeminiPrompt(likedMovies, preferences, alreadyRecommended = []) {
+function buildGeminiPrompt(likedMovies, preferences, alreadyRecommended = [], excludeMovies = []) {
     const page = preferences.page || 1;
     const offset = (page - 1) * 5;
     
@@ -33,6 +33,7 @@ Preferences:
 ${contentTypeFilter ? `- Content Type: ${contentTypeFilter}` : ''}
 ${regionFilter ? `- Region: ${regionFilter}` : ''}
 ${alreadyRecommended.length ? `Do NOT recommend any of these: ${alreadyRecommended.join(', ')}` : ''}
+${excludeMovies && excludeMovies.length ? `Do NOT recommend any of these (already watched or in watchlist): ${excludeMovies.join(', ')}` : ''}
 
 Important Guidelines:
 1. ${contentTypeFilter || 'Recommend both movies and TV series'}
@@ -204,7 +205,7 @@ module.exports = async (req, res) => {
         return res.status(405).json({ error: 'Method not allowed' });
     }
     try {
-        const { likedMovies, preferences, alreadyRecommended = [] } = req.body || (typeof req.body === 'string' ? JSON.parse(req.body) : {});
+        const { likedMovies, preferences, alreadyRecommended = [], excludeMovies = [] } = req.body || (typeof req.body === 'string' ? JSON.parse(req.body) : {});
         if (!likedMovies || !preferences) {
             return res.status(400).json({ error: 'Missing required parameters' });
         }
@@ -219,7 +220,7 @@ module.exports = async (req, res) => {
 
         const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
         const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-        const prompt = buildGeminiPrompt(likedMovies, preferences, alreadyRecommended);
+        const prompt = buildGeminiPrompt(likedMovies, preferences, alreadyRecommended, excludeMovies);
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const responseText = response.text().trim();
@@ -231,6 +232,10 @@ module.exports = async (req, res) => {
             console.error('Failed to parse Gemini response:', cleanResponse);
             throw new Error('Failed to parse AI response');
         }
+
+        // Filter out any recommendations that are in excludeMovies (case-insensitive)
+        const excludeSet = new Set((excludeMovies || []).map(t => t.toLowerCase().trim()));
+        recommendations = recommendations.filter(rec => !excludeSet.has(rec.title.toLowerCase().trim()));
 
         const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500';
         const enrichedRecommendations = await Promise.all(
